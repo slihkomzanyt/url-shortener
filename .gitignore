@@ -1,0 +1,8 @@
+.env
+.env.local
+local.yaml
+*.exe
+*.log
+.idea/
+.vscode/
+
