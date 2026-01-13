@@ -8,9 +8,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"url-shortener/internal/auth"
 	"url-shortener/internal/config"
+	authhandler "url-shortener/internal/http-server/handlers/auth"
 	"url-shortener/internal/http-server/handlers/redirect"
 	"url-shortener/internal/http-server/handlers/url/save"
+	jwtmw "url-shortener/internal/http-server/middleware/jwt"
 	mwlogger "url-shortener/internal/http-server/middleware/logger"
 	"url-shortener/internal/storage/postgres"
 	"url-shortener/lib/logger/handlers/slogpretty"
@@ -19,8 +22,8 @@ import (
 
 func main() {
 	cfg := config.MustLoad()
-
 	log := setupLogger(cfg.Env)
+
 	log.Info("starting url-shortener", slog.String("env", cfg.Env))
 	log.Debug("debug messages are enabled")
 
@@ -29,7 +32,8 @@ func main() {
 		log.Error("failed to init storage", sl.Err(err))
 		os.Exit(1)
 	}
-	_ = storage // временно, пока storage не используется дальше
+
+	tm := auth.NewTokenManager(cfg.JWT.Secret, cfg.JWT.TTL)
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
@@ -38,15 +42,17 @@ func main() {
 	router.Use(middleware.Recoverer)
 	router.Use(middleware.URLFormat)
 
-	router.Route("/url", func(r chi.Router) {
-		r.Use(middleware.BasicAuth("url-shortener", map[string]string{
-			cfg.HTTPServer.User: cfg.HTTPServer.Password,
-		}))
+	// PUBLIC: login -> returns JWT
+	login := authhandler.NewLoginHandler(tm, cfg.HTTPServer.User, cfg.HTTPServer.Password)
+	router.Post("/auth/login", login.ServeHTTP)
 
+	// PROTECTED: create short url
+	router.Route("/url", func(r chi.Router) {
+		r.Use(jwtmw.JWT(tm))
 		r.Post("/", save.New(log, storage))
 	})
 
-	router.Post("/url", save.New(log, storage))
+	// PUBLIC: redirect
 	router.Get("/{alias}", redirect.New(log, storage))
 
 	log.Info("starting server", slog.String("address", cfg.HTTPServer.Address))
@@ -79,11 +85,8 @@ func setupLogger(env string) *slog.Logger {
 
 func setupPrettySlog() *slog.Logger {
 	opts := slogpretty.PrettyHandlerOptions{
-		SlogOpts: &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		},
+		SlogOpts: &slog.HandlerOptions{Level: slog.LevelDebug},
 	}
-
 	handler := opts.NewPrettyHandler(os.Stdout)
 	return slog.New(handler)
 }
